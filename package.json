@@ -1,0 +1,25 @@
+{
+  "name": "sanzida15",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "三打十五 — 3 wolves vs 15 sheep, core rules engine + AI",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "tsc -p tsconfig.json && node dist/tests/core/perft.test.js && node dist/tests/core/rules.test.js && node dist/tests/core/ai.test.js && node dist/tests/web/session.test.js",
+    "perft": "node dist/src/cli/perft.js",
+    "selfplay": "node dist/src/cli/selfplay.js",
+    "play": "node dist/src/cli/play.js",
+    "web": "tsc -p tsconfig.json && node dist/src/cli/serve.js",
+    "serve": "node dist/src/cli/serve.js",
+    "bundle": "tsc -p tsconfig.json && node dist/src/cli/bundle.js",
+    "start": "node dist/src/cli/serve.js"
+  },
+  "devDependencies": {
+    "@types/node": "^22.9.0",
+    "typescript": "^5.6.3"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
