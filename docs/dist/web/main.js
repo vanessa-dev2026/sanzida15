@@ -443,8 +443,9 @@ function startP2PHost(side) {
     manual = false;
     session = new Session({ humanSide: side, level, wolfCols: [0, 2, 4] });
     myNetTurn = side === 'wolf';
-    netStatus.textContent = `房间 ${code} · 点下面复制邀请链接发给朋友`;
-    netCopy.hidden = false;
+    netStatus.textContent = `房间 ${code} · 把房号发给朋友`;
+    if (netCopy)
+        netCopy.hidden = false;
     render();
 }
 function startP2PJoin(code) {
@@ -502,7 +503,7 @@ netJoin.addEventListener('click', async () => {
 netClose.addEventListener('click', () => {
     netPanel.hidden = true;
 });
-netCopy.addEventListener('click', async () => {
+netCopy?.addEventListener('click', async () => {
     if (!net)
         return;
     const url = `${location.origin}${location.pathname}?room=${net.roomId}`;
