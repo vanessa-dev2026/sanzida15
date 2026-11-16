@@ -31,6 +31,21 @@ const netJoin = document.getElementById('net-join');
 const netCode = document.getElementById('net-code');
 const netClose = document.getElementById('net-close');
 const netCopy = document.getElementById('net-copy');
+const netLogEl = document.getElementById('net-log');
+const netLines = [];
+function logNet(line) {
+    const t = new Date().toLocaleTimeString('zh-CN', { hour12: false });
+    netLines.push(`${t} ${line}`);
+    if (netLines.length > 8)
+        netLines.shift();
+    if (netLogEl) {
+        netLogEl.textContent = netLines.join('\n');
+    }
+    else {
+        netStatus.style.whiteSpace = 'pre-line';
+        netStatus.textContent = netLines.slice(-3).join('\n');
+    }
+}
 const sideSeg = document.getElementById('side-seg');
 const levelSeg = document.getElementById('level-seg');
 let side = 'wolf';
@@ -99,11 +114,14 @@ function render() {
     const mine = session.humanTurn;
     manualBtn.classList.toggle('on', manual);
     if (p2p && net) {
+        const role = p2pSide === 'wolf' ? '狼' : '羊';
         statusEl.textContent = session.outcome
             ? '对局结束'
-            : myNetTurn
-                ? `直连 · 房间 ${net.roomId} · 轮到你`
-                : `直连 · 房间 ${net.roomId} · 等对手`;
+            : !p2p.synced && !p2p.isHost
+                ? `直连 · 你执${role} · 同步中…`
+                : myNetTurn
+                    ? `直连 · 你执${role} · 轮到你`
+                    : `直连 · 你执${role} · 等对手`;
     }
     else if (net) {
         statusEl.textContent = session.outcome
@@ -388,6 +406,9 @@ function connectRoom(roomId) {
         netStatus.textContent = '连接断开，刷新页面重试';
     });
 }
+function closeNetPanel() {
+    netPanel.hidden = true;
+}
 netOpen.addEventListener('click', () => {
     netPanel.hidden = false;
 });
@@ -405,26 +426,38 @@ function p2pEvents() {
             netStatus.textContent = txt;
         },
         onError: (txt) => {
+            logNet(`错误：${txt}`);
             netStatus.textContent = `连接失败：${txt}。可改用「邀请朋友接着下」`;
         },
+        onLog: (txt) => logNet(txt),
         onPeerConnected: () => {
             p2p?.sendCode(session.code());
+            closeNetPanel();
         },
         onMoveRequest: (from, to) => {
-            if (session.playHuman(from, to)) {
-                myNetTurn = false;
-                p2p?.sendCode(session.code());
-                render();
-            }
+            // 房主替客机落子：不能用 playHuman（它有"轮到你"的限制）
+            const mv = session.game.legalMoves().find((m) => m.from === from && m.to === to);
+            if (!mv)
+                return;
+            session.game.play(mv);
+            myNetTurn = true;
+            p2p?.sendCode(session.code());
+            closeNetPanel();
+            render();
         },
         onState: (code, hostSide) => {
             const r = replayCode(code);
-            if (!r.ok)
+            if (!r.ok) {
+                netStatus.textContent = `同步失败：${r.error}`;
                 return;
+            }
             p2pSide = hostSide === 'wolf' ? 'sheep' : 'wolf';
             session = new Session({ humanSide: p2pSide, level, wolfCols: r.layout, game: r.game });
             myNetTurn = session.game.state.turn === (p2pSide === 'wolf' ? 0 : 1);
-            netStatus.textContent = myNetTurn ? '轮到你' : '等房主走…';
+            netStatus.textContent =
+                `已同步 ${session.moveCount} 步 · 你执${p2pSide === 'wolf' ? '狼' : '羊'} · ` +
+                    (myNetTurn ? '轮到你' : '等房主走');
+            closeNetPanel();
             render();
         },
     };
@@ -458,6 +491,7 @@ function startP2PJoin(code) {
     net = { roomId: code, side: 'wolf', token: 'p2p' };
     manual = false;
     myNetTurn = false;
+    netStatus.textContent = '连接中…';
     p2p.join(code);
     netStatus.textContent = '连接中…';
     render();
