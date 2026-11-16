@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>中转服务器连通性测试</title>
+<style>
+  body { font-family: -apple-system, "Microsoft YaHei", sans-serif; background:#f3ebdd; color:#1c1a17; padding:20px; max-width:640px; margin:0 auto; }
+  h1 { font-size:18px; }
+  .row { padding:10px 12px; border-radius:8px; background:#fff9ef; margin:8px 0; border:1px solid #e0d6c4; }
+  .name { font-family: ui-monospace, Consolas, monospace; font-size:13px; word-break:break-all; }
+  .st { font-size:13px; margin-top:4px; }
+  .ok { color:#1d7a3c; font-weight:600; }
+  .bad { color:#b02e24; font-weight:600; }
+  .wait { color:#8a7d68; }
+  .tip { font-size:12px; color:#6b6253; margin-top:16px; line-height:1.6; }
+</style>
+</head>
+<body>
+<h1>中转服务器连通性测试</h1>
+<div id="list"></div>
+<div class="tip">
+  绿色 = 能连上，可以拿它做中转；红色 = 连不上。<br />
+  把这张截图发给我即可。
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/mqtt@5.10.1/dist/mqtt.min.js"></script>
+<script>
+const endpoints = [
+  ['EMQX 公共服务器', 'wss://broker.emqx.io:8084/mqtt'],
+  ['HiveMQ 公共服务器', 'wss://broker.hivemq.com:8884/mqtt'],
+  ['Eclipse 公共服务器', 'wss://mqtt.eclipseprojects.io:443/mqtt'],
+  ['Mosquitto 测试服务器', 'wss://test.mosquitto.org:8081/mqtt'],
+];
+
+const list = document.getElementById('list');
+const rows = {};
+
+for (const [name, url] of endpoints) {
+  const div = document.createElement('div');
+  div.className = 'row';
+  div.innerHTML = `<div class="name">${name}<br>${url}</div><div class="st wait">测试中…</div>`;
+  list.appendChild(div);
+  rows[url] = { el: div.querySelector('.st'), done: false };
+}
+
+function mark(url, ok, text) {
+  const r = rows[url];
+  if (!r || r.done) return;
+  r.done = true;
+  r.el.className = 'st ' + (ok ? 'ok' : 'bad');
+  r.el.textContent = text;
+}
+
+if (typeof mqtt === 'undefined') {
+  for (const u of Object.keys(rows)) mark(u, false, '客户端脚本没加载出来（CDN 被拦）');
+} else {
+  for (const [name, url] of endpoints) {
+    try {
+      const client = mqtt.connect(url, {
+        connectTimeout: 7000,
+        reconnectPeriod: 0,
+        clientId: 'szd-probe-' + Math.random().toString(16).slice(2, 10),
+        clean: true,
+      });
+      const t = setTimeout(() => {
+        mark(url, false, '超时（7 秒）');
+        try { client.end(true); } catch (e) {}
+      }, 7500);
+      client.on('connect', () => {
+        clearTimeout(t);
+        mark(url, true, '✅ 连接成功');
+        try { client.end(true); } catch (e) {}
+      });
+      client.on('error', (e) => {
+        clearTimeout(t);
+        mark(url, false, '❌ ' + (e && e.message ? e.message : e));
+        try { client.end(true); } catch (err) {}
+      });
+    } catch (e) {
+      mark(url, false, '❌ ' + e.message);
+    }
+  }
+}
+</script>
+</body>
+</html>
