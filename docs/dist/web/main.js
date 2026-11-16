@@ -30,6 +30,7 @@ const netCreate = document.getElementById('net-create');
 const netJoin = document.getElementById('net-join');
 const netCode = document.getElementById('net-code');
 const netClose = document.getElementById('net-close');
+const netCopy = document.getElementById('net-copy');
 const sideSeg = document.getElementById('side-seg');
 const levelSeg = document.getElementById('level-seg');
 let side = 'wolf';
@@ -339,6 +340,14 @@ hintBtn.addEventListener('click', () => {
         render();
     }, 1600);
 });
+// ?room=XXXX：从邀请链接直接进房
+const roomParam = new URLSearchParams(location.search).get('room');
+if (roomParam) {
+    netPanel.hidden = false;
+    netCode.value = roomParam.toUpperCase();
+    if (P2P_MODE)
+        startP2PJoin(roomParam.toUpperCase());
+}
 // 从邀请链接载入棋局
 const hash = location.hash.match(/#g=([0-9a-z]+)/i);
 if (hash) {
@@ -434,7 +443,8 @@ function startP2PHost(side) {
     manual = false;
     session = new Session({ humanSide: side, level, wolfCols: [0, 2, 4] });
     myNetTurn = side === 'wolf';
-    netStatus.textContent = `房间 ${code} · 把房号发给朋友`;
+    netStatus.textContent = `房间 ${code} · 点下面复制邀请链接发给朋友`;
+    netCopy.hidden = false;
     render();
 }
 function startP2PJoin(code) {
@@ -491,6 +501,19 @@ netJoin.addEventListener('click', async () => {
 });
 netClose.addEventListener('click', () => {
     netPanel.hidden = true;
+});
+netCopy.addEventListener('click', async () => {
+    if (!net)
+        return;
+    const url = `${location.origin}${location.pathname}?room=${net.roomId}`;
+    try {
+        await navigator.clipboard.writeText(url);
+        netCopy.textContent = '已复制，发给朋友';
+    }
+    catch {
+        window.prompt('复制这条链接发给朋友：', url);
+    }
+    setTimeout(() => { netCopy.textContent = '复制邀请链接'; }, 2000);
 });
 buildBoard();
 render();

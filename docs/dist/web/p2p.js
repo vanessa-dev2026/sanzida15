@@ -10,6 +10,21 @@ const ICE = {
         { urls: 'stun:stun.chat.bilibili.com:3478' },
         { urls: 'stun:stun.l.google.com:19302' },
         { urls: 'stun:stun1.l.google.com:19302' },
+        // 公共 TURN 中转：直连打不通时兜底（免费，公开凭据）
+        {
+            urls: [
+                'turn:openrelay.metered.ca:80',
+                'turn:openrelay.metered.ca:443',
+                'turn:openrelay.metered.ca:443?transport=tcp',
+            ],
+            username: 'openrelayproject',
+            credential: 'openrelayproject',
+        },
+        {
+            urls: ['turn:turn.anyfirewall.com:443?transport=tcp'],
+            username: 'webrtc',
+            credential: 'webrtc',
+        },
     ],
 };
 export function peerReady() {
