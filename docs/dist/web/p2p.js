@@ -34,8 +34,10 @@ export class P2P {
     ev;
     peer = null;
     conn = null;
+    syncTimer = null;
     isHost = false;
     roomCode = '';
+    synced = false;
     constructor(ev) {
         this.ev = ev;
     }
@@ -52,11 +54,16 @@ export class P2P {
             code += alphabet[Math.floor(Math.random() * alphabet.length)];
         this.roomCode = code;
         this.peer = this.newPeer(PREFIX + code);
-        this.peer.on('open', () => this.ev.onStatus?.(`房间 ${code} · 等朋友连进来`));
+        this.peer.on('open', () => {
+            this.ev.onLog?.(`peer open id=${PREFIX + code}`);
+            this.ev.onStatus?.(`房间 ${code} · 等朋友连进来`);
+        });
         this.peer.on('error', (e) => this.ev.onError?.(String(e?.type ?? e)));
         this.peer.on('connection', (conn) => {
             this.conn = conn;
+            this.ev.onLog?.('收到对方连接，等通道打开…');
             conn.on('open', () => {
+                this.ev.onLog?.('房主侧通道已开，发送局面');
                 this.ev.onStatus?.('朋友已连上，开始下棋');
                 this.ev.onPeerConnected?.();
             });
@@ -64,8 +71,10 @@ export class P2P {
                 const m = d;
                 if (m?.t === 'move')
                     this.ev.onMoveRequest?.(m.from, m.to);
-                if (m?.t === 'hello')
+                if (m?.t === 'hello') {
+                    this.ev.onLog?.('收到 hello，回发局面');
                     this.ev.onPeerConnected?.();
+                }
             });
         });
         return code;
@@ -80,13 +89,32 @@ export class P2P {
             const conn = this.peer.connect(PREFIX + this.roomCode, { reliable: true });
             this.conn = conn;
             conn.on('open', () => {
-                this.ev.onStatus?.('已连上房主，开始下棋');
-                conn.send({ t: 'hello' });
+                this.ev.onLog?.('客机通道已开，发 hello');
+                this.ev.onStatus?.('已连上房主，正在同步棋局…');
+                const ask = () => {
+                    try {
+                        conn.send({ t: 'hello' });
+                    }
+                    catch { /* 忽略 */ }
+                };
+                ask();
+                this.syncTimer = setInterval(() => {
+                    if (this.synced) {
+                        if (this.syncTimer)
+                            clearInterval(this.syncTimer);
+                        this.syncTimer = null;
+                        return;
+                    }
+                    ask();
+                }, 1500);
             });
             conn.on('data', (d) => {
                 const m = d;
-                if (m?.t === 'state')
+                if (m?.t === 'state') {
+                    this.synced = true;
+                    this.ev.onLog?.(`收到局面 code=${m.code} side=${m.side}`);
                     this.ev.onState?.(m.code, m.side);
+                }
             });
             conn.on('error', (e) => this.ev.onError?.(String(e)));
         });
@@ -95,23 +123,37 @@ export class P2P {
     hostSide = 'wolf';
     send(m) {
         try {
-            if (this.conn?.open)
-                this.conn.send(m);
+            if (!this.conn) {
+                this.ev.onLog?.('发送失败：还没有连接');
+                return false;
+            }
+            if (!this.conn.open) {
+                this.ev.onLog?.('发送失败：通道未打开');
+                return false;
+            }
+            this.conn.send(m);
+            return true;
         }
-        catch {
-            /* 忽略 */
+        catch (e) {
+            this.ev.onLog?.(`发送异常：${String(e)}`);
+            return false;
         }
     }
     sendMove(from, to) {
         this.send({ t: 'move', from, to });
     }
     sendCode(code) {
-        this.send({ t: 'state', code, side: this.hostSide });
+        const ok = this.send({ t: 'state', code, side: this.hostSide });
+        this.ev.onLog?.(`发送局面 code=${code} ok=${ok}`);
     }
     get connected() {
         return !!this.conn?.open;
     }
     close() {
+        if (this.syncTimer)
+            clearInterval(this.syncTimer);
+        this.syncTimer = null;
+        this.synced = false;
         try {
             this.conn?.close();
             this.peer?.destroy();
