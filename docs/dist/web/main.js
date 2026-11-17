@@ -5,7 +5,6 @@ import { bits } from '../src/core/board.js';
 import { Game, startState } from '../src/core/rules.js';
 import { replayCode, shareUrl } from './codec.js';
 import { createRoom, joinRoom, sendMove, subscribe } from './net.js';
-import { P2P, peerReady } from './p2p.js';
 const pointsEl = document.getElementById('points');
 const statusEl = document.getElementById('status');
 const counterEl = document.getElementById('counter');
@@ -118,10 +117,10 @@ function render() {
         statusEl.textContent = session.outcome
             ? '对局结束'
             : !p2p.synced && !p2p.isHost
-                ? `直连 · 你执${role} · 同步中…`
+                ? `联机 · 你执${role} · 同步中…`
                 : myNetTurn
-                    ? `直连 · 你执${role} · 轮到你`
-                    : `直连 · 你执${role} · 等对手`;
+                    ? `联机 · 你执${role} · 轮到你`
+                    : `联机 · 你执${role} · 等对手`;
     }
     else if (net) {
         statusEl.textContent = session.outcome
@@ -364,7 +363,7 @@ if (roomParam) {
     netPanel.hidden = false;
     netCode.value = roomParam.toUpperCase();
     if (P2P_MODE)
-        startP2PJoin(roomParam.toUpperCase());
+        void startP2PJoin(roomParam.toUpperCase());
 }
 // 从邀请链接载入棋局
 const hash = location.hash.match(/#g=([0-9a-z]+)/i);
@@ -420,6 +419,164 @@ netSide.addEventListener('click', (e) => {
         b.classList.toggle('active', b === t);
     }
 });
+/* ---------------- MQTT 中转（公共服务器，免部署） ---------------- */
+const BROKERS = [
+    'wss://broker.emqx.io:8084/mqtt',
+    'wss://broker.hivemq.com:8884/mqtt',
+    'wss://test.mosquitto.org:8081/mqtt',
+];
+let mqttReady = null;
+function ensureMqtt() {
+    if (window.mqtt)
+        return Promise.resolve(true);
+    if (mqttReady)
+        return mqttReady;
+    mqttReady = new Promise((resolve) => {
+        const s = document.createElement('script');
+        s.src = 'https://cdn.jsdelivr.net/npm/mqtt@5.10.1/dist/mqtt.min.js';
+        s.onload = () => resolve(true);
+        s.onerror = () => resolve(false);
+        document.head.appendChild(s);
+    });
+    return mqttReady;
+}
+class Relay {
+    ev;
+    isHost = false;
+    hostSide = 'wolf';
+    synced = false;
+    client = null;
+    code = '';
+    brokerIndex = 0;
+    helloTimer = null;
+    constructor(ev) {
+        this.ev = ev;
+    }
+    base() {
+        return `szd15/${this.code}/`;
+    }
+    host() {
+        const alphabet = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
+        let code = '';
+        for (let i = 0; i < 5; i++)
+            code += alphabet[Math.floor(Math.random() * alphabet.length)];
+        this.code = code;
+        this.isHost = true;
+        this.connect();
+        return code;
+    }
+    join(code) {
+        this.code = code.toUpperCase();
+        this.isHost = false;
+        this.connect();
+    }
+    connect() {
+        const mqtt = window.mqtt;
+        const url = BROKERS[this.brokerIndex % BROKERS.length];
+        this.ev.onLog?.(`连接中转 ${url}`);
+        const client = mqtt.connect(url, {
+            connectTimeout: 8000,
+            reconnectPeriod: 3000,
+            clientId: 'szd-' + Math.random().toString(16).slice(2, 10),
+            clean: true,
+        });
+        this.client = client;
+        client.on('connect', () => {
+            this.ev.onLog?.('中转已连上');
+            if (this.isHost) {
+                client.subscribe(this.base() + 'move');
+                this.ev.onStatus?.(`房间 ${this.code} · 等朋友连进来`);
+            }
+            else {
+                client.subscribe(this.base() + 'state');
+                const ask = () => {
+                    try {
+                        client.publish(this.base() + 'move', JSON.stringify({ t: 'hello' }));
+                    }
+                    catch { /* ignore */ }
+                };
+                ask();
+                if (this.helloTimer)
+                    clearInterval(this.helloTimer);
+                this.helloTimer = setInterval(() => {
+                    if (this.synced) {
+                        if (this.helloTimer)
+                            clearInterval(this.helloTimer);
+                        this.helloTimer = null;
+                        return;
+                    }
+                    ask();
+                }, 1500);
+                this.ev.onStatus?.('已连上中转，正在同步棋局…');
+            }
+        });
+        client.on('message', (_topic, payload) => {
+            let msg = null;
+            try {
+                msg = JSON.parse(new TextDecoder().decode(payload));
+            }
+            catch {
+                return;
+            }
+            if (!msg)
+                return;
+            if (this.isHost) {
+                if (msg.t === 'hello') {
+                    this.ev.onLog?.('收到 hello，回发局面');
+                    this.ev.onPeerConnected?.();
+                }
+                else if (msg.t === 'move') {
+                    this.ev.onMoveRequest?.(msg.from, msg.to);
+                }
+            }
+            else if (msg.t === 'state') {
+                this.synced = true;
+                this.ev.onLog?.(`收到局面 code=${msg.code}`);
+                this.ev.onState?.(msg.code, msg.side);
+            }
+        });
+        client.on('error', (e) => {
+            this.ev.onLog?.(`中转错误：${e?.message ?? e}`);
+            this.brokerIndex++;
+            if (this.brokerIndex < BROKERS.length * 2) {
+                try {
+                    this.client?.end(true);
+                }
+                catch { /* ignore */ }
+                setTimeout(() => this.connect(), 500);
+            }
+            else {
+                this.ev.onError?.('中转服务器都连不上');
+            }
+        });
+    }
+    sendCode(code) {
+        try {
+            this.client?.publish(this.base() + 'state', JSON.stringify({ t: 'state', code, side: this.hostSide }));
+            this.ev.onLog?.(`发送局面 code=${code}`);
+        }
+        catch { /* ignore */ }
+    }
+    sendMove(from, to) {
+        try {
+            this.client?.publish(this.base() + 'move', JSON.stringify({ t: 'move', from, to }));
+        }
+        catch { /* ignore */ }
+    }
+    get connected() {
+        return !!this.client?.connected;
+    }
+    close() {
+        if (this.helloTimer)
+            clearInterval(this.helloTimer);
+        this.helloTimer = null;
+        try {
+            this.client?.end(true);
+        }
+        catch { /* ignore */ }
+        this.client = null;
+    }
+}
 function p2pEvents() {
     return {
         onStatus: (txt) => {
@@ -462,16 +619,17 @@ function p2pEvents() {
         },
     };
 }
-function startP2PHost(side) {
-    if (!peerReady()) {
-        netStatus.textContent = '直连组件没加载出来（CDN 被拦），请用「邀请朋友接着下」';
+async function startP2PHost(side) {
+    if (!(await ensureMqtt())) {
+        netStatus.textContent = '中转组件没加载出来（CDN 被拦），请用「邀请朋友接着下」';
         return;
     }
     p2p?.close();
-    p2p = new P2P(p2pEvents());
+    p2p = new Relay(p2pEvents());
     p2p.hostSide = side;
     p2pSide = side;
     const code = p2p.host();
+    netPanel.hidden = false;
     net = { roomId: code, side, token: 'p2p' };
     manual = false;
     session = new Session({ humanSide: side, level, wolfCols: [0, 2, 4] });
@@ -481,13 +639,13 @@ function startP2PHost(side) {
         netCopy.hidden = false;
     render();
 }
-function startP2PJoin(code) {
-    if (!peerReady()) {
-        netStatus.textContent = '直连组件没加载出来（CDN 被拦），请用「邀请朋友接着下」';
+async function startP2PJoin(code) {
+    if (!(await ensureMqtt())) {
+        netStatus.textContent = '中转组件没加载出来（CDN 被拦），请用「邀请朋友接着下」';
         return;
     }
     p2p?.close();
-    p2p = new P2P(p2pEvents());
+    p2p = new Relay(p2pEvents());
     net = { roomId: code, side: 'wolf', token: 'p2p' };
     manual = false;
     myNetTurn = false;
@@ -500,7 +658,7 @@ netCreate.addEventListener('click', async () => {
     const active = netSide.querySelector('button.active');
     const side = (active?.dataset.ns ?? 'wolf');
     if (P2P_MODE) {
-        startP2PHost(side);
+        void startP2PHost(side);
         return;
     }
     try {
@@ -521,7 +679,7 @@ netJoin.addEventListener('click', async () => {
         return;
     }
     if (P2P_MODE) {
-        startP2PJoin(code);
+        void startP2PJoin(code);
         return;
     }
     try {
