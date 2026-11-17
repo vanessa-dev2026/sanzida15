@@ -59,9 +59,24 @@ let net = null;
 /** GitHub Pages 等纯静态环境：没有后端，只能 P2P 直连 */
 const P2P_MODE = location.hostname.endsWith('github.io') || location.search.includes('p2p');
 let p2p = null;
+let hostBeat = null;
+function startHostBeat() {
+    stopHostBeat();
+    hostBeat = setInterval(() => {
+        if (p2p?.isHost && net)
+            p2p.sendCode(session.code());
+    }, 2000);
+}
+function stopHostBeat() {
+    if (hostBeat)
+        clearInterval(hostBeat);
+    hostBeat = null;
+}
 let p2pSide = 'wolf';
 let es = null;
 let myNetTurn = false;
+// 手机上点击默认有 300ms 延迟（等双击缩放），关掉它，点一下就响应
+document.head.insertAdjacentHTML('beforeend', '<style>.point,button{touch-action:manipulation}</style>');
 const cells = [];
 function buildBoard() {
     for (let i = 0; i < 25; i++) {
@@ -80,34 +95,43 @@ function isWolf(p) {
 function isSheep(p) {
     return (session.game.state.sheep & (1 << p)) !== 0;
 }
+const lastSig = new Array(25).fill('');
 function render() {
     const s = session.game.state;
     const wolfSet = new Set(bits(s.wolves));
     const sheepSet = new Set(bits(s.sheep));
+    // 只更新变化的格子：原来每步重建全部 DOM，羊多时会掉帧
     for (let i = 0; i < 25; i++) {
+        const isW = wolfSet.has(i);
+        const isS = sheepSet.has(i);
+        const sel = selected === i;
+        const hasTarget = targets.has(i);
+        const isCapture = hasTarget && targets.get(i) >= 0;
+        const isHint = !!hint && (hint.from === i || hint.to === i);
+        const sig = `${isW ? 'W' : isS ? 'S' : '-'}${sel ? 1 : 0}${hasTarget ? (isCapture ? 'C' : 'T') : '0'}${isHint ? 1 : 0}`;
+        if (lastSig[i] === sig)
+            continue;
+        lastSig[i] = sig;
         const b = cells[i];
-        b.className = 'point';
-        b.textContent = '';
-        if (wolfSet.has(i)) {
-            b.classList.add('wolf');
+        b.className =
+            'point' +
+                (isW ? ' wolf' : isS ? ' sheep' : '') +
+                (sel ? ' selected' : '') +
+                (hasTarget ? (isCapture ? ' capture-target' : ' target') : '') +
+                (isHint ? ' hint' : '');
+        const want = isW ? '狼' : isS ? '羊' : '';
+        const cur = b.firstElementChild;
+        if (!want) {
+            if (cur)
+                b.textContent = '';
+        }
+        else if (!cur || cur.textContent !== want) {
+            b.textContent = '';
             const sp = document.createElement('span');
             sp.className = 'piece';
-            sp.textContent = '狼';
+            sp.textContent = want;
             b.appendChild(sp);
         }
-        else if (sheepSet.has(i)) {
-            b.classList.add('sheep');
-            const sp = document.createElement('span');
-            sp.className = 'piece';
-            sp.textContent = '羊';
-            b.appendChild(sp);
-        }
-        if (selected === i)
-            b.classList.add('selected');
-        if (targets.has(i))
-            b.classList.add(targets.get(i) >= 0 ? 'capture-target' : 'target');
-        if (hint && (hint.from === i || hint.to === i))
-            b.classList.add('hint');
     }
     const turn = s.turn === WOLVES ? '狼' : '羊';
     const mine = session.humanTurn;
@@ -178,8 +202,12 @@ function onPoint(p) {
                 }
             }
             else {
+                // 客机：先本地落子（0 延迟），再发请求；房主确认后以权威局面覆盖
+                if (session.playHuman(from, p)) {
+                    myNetTurn = false;
+                    render();
+                }
                 p2p.sendMove(from, p);
-                render();
             }
             return;
         }
@@ -265,7 +293,7 @@ async function aiTurn() {
         return;
     busy = true;
     render();
-    await new Promise((r) => setTimeout(r, 180));
+    await new Promise((r) => setTimeout(r, 90));
     session.playAi();
     busy = false;
     render();
@@ -276,6 +304,8 @@ function newGame() {
     clearSelection();
     hint = null;
     busy = false;
+    stopHostBeat();
+    lastSig.fill('');
     session = new Session({ humanSide: side, level, manual });
     render();
     if (!session.humanTurn)
@@ -498,15 +528,7 @@ class Relay {
                 ask();
                 if (this.helloTimer)
                     clearInterval(this.helloTimer);
-                this.helloTimer = setInterval(() => {
-                    if (this.synced) {
-                        if (this.helloTimer)
-                            clearInterval(this.helloTimer);
-                        this.helloTimer = null;
-                        return;
-                    }
-                    ask();
-                }, 1500);
+                this.helloTimer = setInterval(ask, 3000);
                 this.ev.onStatus?.('已连上中转，正在同步棋局…');
             }
         });
@@ -608,6 +630,9 @@ function p2pEvents() {
                 netStatus.textContent = `同步失败：${r.error}`;
                 return;
             }
+            // 忽略比当前更旧的局面（心跳可能乱序到达）
+            if (r.game.moves.length < session.moveCount)
+                return;
             p2pSide = hostSide === 'wolf' ? 'sheep' : 'wolf';
             session = new Session({ humanSide: p2pSide, level, wolfCols: r.layout, game: r.game });
             myNetTurn = session.game.state.turn === (p2pSide === 'wolf' ? 0 : 1);
@@ -629,6 +654,7 @@ async function startP2PHost(side) {
     p2p.hostSide = side;
     p2pSide = side;
     const code = p2p.host();
+    startHostBeat();
     netPanel.hidden = false;
     net = { roomId: code, side, token: 'p2p' };
     manual = false;
