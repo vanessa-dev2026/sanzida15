@@ -3,24 +3,30 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
-  <meta name="theme-color" content="#f3ebdd" />
-  <title>三打十五</title>
-  <link rel="stylesheet" href="web/style.css" />
+  <meta name="theme-color" content="#f4ecdd" />
+  <meta name="description" content="三打十五：三只狼对十五只羊的围棋式棋子游戏，可人机对战，也可和朋友联机实时对下。" />
+  <title>三打十五 · 三狼对十五羊</title>
+  <link rel="stylesheet" href="web/style.css?v=3" />
 </head>
 <body>
   <main class="app">
     <header class="hud">
-      <h1>三打十五</h1>
+      <div class="brand">
+        <h1>三打十五</h1>
+        <p class="tagline">三 狼 · 十 五 羊</p>
+      </div>
       <div class="hud-line">
         <span id="status" class="status">你执狼 · 轮到你</span>
         <span id="counter" class="counter">羊 15/15 · 0 步</span>
       </div>
+      <div class="pips" id="pips" aria-hidden="true"></div>
+      <div class="matchup" id="matchup" hidden></div>
     </header>
 
     <div class="board-wrap">
       <div class="board" id="board">
         <svg class="lattice" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
-          <g stroke="#1c1a17" stroke-opacity="0.22" stroke-width="0.35">
+          <g stroke="#1b1916" stroke-opacity="0.20" stroke-width="0.35">
             <line x1="10" y1="10" x2="90" y2="10" />
             <line x1="10" y1="30" x2="90" y2="30" />
             <line x1="10" y1="50" x2="90" y2="50" />
@@ -32,6 +38,11 @@
             <line x1="70" y1="10" x2="70" y2="90" />
             <line x1="90" y1="10" x2="90" y2="90" />
           </g>
+          <g fill="#1b1916" fill-opacity="0.30">
+            <circle cx="10" cy="10" r="1.1" /><circle cx="50" cy="10" r="1.1" /><circle cx="90" cy="10" r="1.1" />
+            <circle cx="10" cy="50" r="1.1" /><circle cx="90" cy="50" r="1.1" />
+            <circle cx="10" cy="90" r="1.1" /><circle cx="50" cy="90" r="1.1" /><circle cx="90" cy="90" r="1.1" />
+          </g>
         </svg>
         <div class="points" id="points"></div>
       </div>
@@ -39,7 +50,10 @@
         <div class="overlay-card">
           <div class="overlay-title" id="overlay-title">狼胜</div>
           <div class="overlay-sub" id="overlay-sub"></div>
-          <button class="primary" id="again">再来一局</button>
+          <div class="overlay-actions">
+            <button class="ghost" id="again-swap">换边再来</button>
+            <button class="primary" id="again">再来一局</button>
+          </div>
         </div>
       </div>
     </div>
@@ -56,28 +70,48 @@
       </div>
       <div class="row">
         <button class="ghost" id="restart">重开</button>
-        <button class="ghost" id="hint">提示</button>
+        <button class="ghost" id="undo">悔棋</button>
       </div>
       <div class="row">
-        <button class="ghost" id="undo">撤销</button>
+        <button class="ghost" id="hint">提示</button>
         <button class="ghost" id="manual">双人对战</button>
       </div>
+      <div class="row" id="room-actions" hidden>
+        <button class="ghost" id="swap">互换阵营</button>
+        <button class="ghost" id="leave">退出房间</button>
+      </div>
+      <button class="primary wide" id="net-open">联机对战</button>
       <button class="ghost wide" id="invite">邀请朋友接着下</button>
-      <button class="primary wide" id="net-open">联机对战（实时）</button>
     </footer>
+
     <div class="invite" id="net-panel" hidden>
       <div class="invite-card">
         <div class="invite-title">联机对战</div>
-        <div class="invite-hint" id="net-status">创建房间，把房号发给朋友</div>
-        <div class="seg" id="net-side" style="margin-bottom:10px">
-          <button data-ns="wolf" class="seg-btn active">我执狼</button>
-          <button data-ns="sheep" class="seg-btn">我执羊</button>
+        <div class="invite-hint" id="net-status">和朋友实时对下，不需要服务器，也不用装东西</div>
+
+        <div class="panel-block">
+          <div class="block-label">开房 · 你先选边</div>
+          <div class="seg" id="net-side">
+            <button data-ns="wolf" class="seg-btn active">我执狼</button>
+            <button data-ns="sheep" class="seg-btn">我执羊</button>
+          </div>
+          <div class="block-tip">朋友加入后自动执另一方，不需要他再选。</div>
+          <button class="primary wide" id="net-create">创建房间</button>
+          <button class="ghost wide" id="net-copy" hidden>复制邀请链接</button>
         </div>
-        <button class="primary wide" id="net-create">创建房间</button>
-        <div class="row" style="margin-top:10px">
-          <input id="net-code" class="code-input" placeholder="输入房号" maxlength="6" />
-          <button class="ghost" id="net-join">加入</button>
+
+        <div class="panel-or">或</div>
+
+        <div class="panel-block">
+          <div class="block-label">加入朋友的房间</div>
+          <div class="row">
+            <input id="net-code" class="code-input" placeholder="房号" maxlength="6" autocomplete="off" />
+            <button class="ghost" id="net-join">加入</button>
+          </div>
+          <div class="block-tip">开房的人已经选好边，进来后你会自动执另一边。</div>
         </div>
+
+        <pre id="net-log" class="net-log"></pre>
         <button class="ghost wide" id="net-close" style="margin-top:10px">关闭</button>
       </div>
     </div>
@@ -85,7 +119,7 @@
     <div class="invite" id="invite-panel" hidden>
       <div class="invite-card">
         <div class="invite-title">把这条链接发给朋友</div>
-        <div class="invite-hint">他打开后从当前这步接着下（你走狼、他走羊，或反过来）</div>
+        <div class="invite-hint">他打开后从当前这步接着下（你走狼、他走羊，或反过来）。不用同时在线。</div>
         <textarea id="invite-text" readonly rows="4"></textarea>
         <div class="row">
           <button class="ghost" id="invite-close">关闭</button>
@@ -93,9 +127,20 @@
         </div>
       </div>
     </div>
+
+    <div class="modal" id="ask" hidden>
+      <div class="modal-card">
+        <div class="modal-title" id="ask-title">提示</div>
+        <div class="modal-sub" id="ask-sub"></div>
+        <div class="row">
+          <button class="ghost" id="ask-cancel">取消</button>
+          <button class="primary" id="ask-ok">确定</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="toast" id="toast" role="status" aria-live="polite"></div>
   </main>
-  <!-- P2P 直连用；加载失败会自动退回服务器模式 -->
-  <script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js" crossorigin="anonymous"></script>
-  <script type="module" src="dist/web/main.js"></script>
+  <script type="module" src="dist/web/main.js?v=3"></script>
 </body>
 </html>
