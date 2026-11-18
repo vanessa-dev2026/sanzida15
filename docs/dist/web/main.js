@@ -4,49 +4,108 @@ import { WOLVES } from '../src/core/moves.js';
 import { bits } from '../src/core/board.js';
 import { Game, startState } from '../src/core/rules.js';
 import { replayCode, shareUrl } from './codec.js';
-import { createRoom, joinRoom, sendMove, subscribe } from './net.js';
-const pointsEl = document.getElementById('points');
-const statusEl = document.getElementById('status');
-const counterEl = document.getElementById('counter');
-const overlay = document.getElementById('overlay');
-const overlayTitle = document.getElementById('overlay-title');
-const overlaySub = document.getElementById('overlay-sub');
-const againBtn = document.getElementById('again');
-const restartBtn = document.getElementById('restart');
-const hintBtn = document.getElementById('hint');
-const undoBtn = document.getElementById('undo');
-const manualBtn = document.getElementById('manual');
-const inviteBtn = document.getElementById('invite');
-const invitePanel = document.getElementById('invite-panel');
-const inviteText = document.getElementById('invite-text');
-const inviteCopy = document.getElementById('invite-copy');
-const inviteClose = document.getElementById('invite-close');
-const netOpen = document.getElementById('net-open');
-const netPanel = document.getElementById('net-panel');
-const netStatus = document.getElementById('net-status');
-const netSide = document.getElementById('net-side');
-const netCreate = document.getElementById('net-create');
-const netJoin = document.getElementById('net-join');
-const netCode = document.getElementById('net-code');
-const netClose = document.getElementById('net-close');
-const netCopy = document.getElementById('net-copy');
-const netLogEl = document.getElementById('net-log');
+import { isFresher, opposite, reqLabel, sideLabel, undoKeepCount, } from './protocol.js';
+/* ================= DOM ================= */
+const byId = (id) => document.getElementById(id);
+const pointsEl = byId('points');
+const statusEl = byId('status');
+const counterEl = byId('counter');
+const pipsEl = byId('pips');
+const matchupEl = byId('matchup');
+const overlay = byId('overlay');
+const overlayTitle = byId('overlay-title');
+const overlaySub = byId('overlay-sub');
+const againBtn = byId('again');
+const againSwapBtn = byId('again-swap');
+const restartBtn = byId('restart');
+const hintBtn = byId('hint');
+const undoBtn = byId('undo');
+const swapBtn = byId('swap');
+const leaveBtn = byId('leave');
+const roomActions = byId('room-actions');
+const manualBtn = byId('manual');
+const inviteBtn = byId('invite');
+const invitePanel = byId('invite-panel');
+const inviteText = byId('invite-text');
+const inviteCopy = byId('invite-copy');
+const inviteClose = byId('invite-close');
+const netOpen = byId('net-open');
+const netPanel = byId('net-panel');
+const netStatus = byId('net-status');
+const netSide = byId('net-side');
+const netCreate = byId('net-create');
+const netJoin = byId('net-join');
+const netCode = byId('net-code');
+const netClose = byId('net-close');
+const netCopy = byId('net-copy');
+const netLogEl = byId('net-log');
+const sideSeg = byId('side-seg');
+const levelSeg = byId('level-seg');
+const toastEl = byId('toast');
+const askEl = byId('ask');
+const askTitle = byId('ask-title');
+const askSub = byId('ask-sub');
+const askOk = byId('ask-ok');
+const askCancel = byId('ask-cancel');
+/* ================= 提示 / 弹窗 ================= */
 const netLines = [];
 function logNet(line) {
     const t = new Date().toLocaleTimeString('zh-CN', { hour12: false });
     netLines.push(`${t} ${line}`);
-    if (netLines.length > 8)
+    if (netLines.length > 10)
         netLines.shift();
-    if (netLogEl) {
+    if (netLogEl)
         netLogEl.textContent = netLines.join('\n');
-    }
-    else {
-        netStatus.style.whiteSpace = 'pre-line';
-        netStatus.textContent = netLines.slice(-3).join('\n');
-    }
 }
-const sideSeg = document.getElementById('side-seg');
-const levelSeg = document.getElementById('level-seg');
+let toastTimer = null;
+function toast(text, ms = 2400) {
+    if (!toastEl) {
+        statusEl.textContent = text;
+        return;
+    }
+    toastEl.textContent = text;
+    toastEl.classList.add('show');
+    if (toastTimer)
+        clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => {
+        toastEl.classList.remove('show');
+        toastTimer = null;
+    }, ms);
+}
+let askResolve = null;
+function ask(title, sub, okText = '确定', cancelText = '取消') {
+    if (!askEl || !askTitle || !askSub || !askOk || !askCancel) {
+        return Promise.resolve(window.confirm(`${title}\n${sub}`));
+    }
+    if (askResolve) {
+        const prev = askResolve;
+        askResolve = null;
+        prev(false);
+    }
+    askTitle.textContent = title;
+    askSub.textContent = sub;
+    askOk.textContent = okText;
+    askCancel.textContent = cancelText;
+    askEl.hidden = false;
+    return new Promise((resolve) => {
+        askResolve = resolve;
+    });
+}
+function closeAsk(ok) {
+    if (askEl)
+        askEl.hidden = true;
+    const r = askResolve;
+    askResolve = null;
+    if (r)
+        r(ok);
+}
+askOk?.addEventListener('click', () => closeAsk(true));
+askCancel?.addEventListener('click', () => closeAsk(false));
+askEl?.addEventListener('click', (e) => {
+    if (e.target === askEl)
+        closeAsk(false);
+});
+/* ================= 状态 ================= */
 let side = 'wolf';
 let level = 'officer';
 let manual = false;
@@ -54,29 +113,44 @@ let session = new Session({ humanSide: side, level, manual });
 let selected = null;
 let targets = new Map(); // to -> captured
 let hint = null;
+let lastMove = null;
 let busy = false;
-let net = null;
-/** GitHub Pages 等纯静态环境：没有后端，只能 P2P 直连 */
-const P2P_MODE = location.hostname.endsWith('github.io') || location.search.includes('p2p');
-let p2p = null;
-let hostBeat = null;
-function startHostBeat() {
-    stopHostBeat();
-    hostBeat = setInterval(() => {
-        if (p2p?.isHost && net)
-            p2p.sendCode(session.code());
-    }, 2000);
+let room = null;
+let relay = null;
+/** 房主广播的版本号：改一次局面 +1 */
+let seq = 0;
+/** 局号：重开 / 换边时 +1 */
+let round = 0;
+/** 客机已接受的版本 */
+let peerSeq = -1;
+let peerRound = -1;
+let pendingReq = null;
+let beatTimer = null;
+function mySide() {
+    return room ? (room.host ? room.hostSide : opposite(room.hostSide)) : side;
 }
-function stopHostBeat() {
-    if (hostBeat)
-        clearInterval(hostBeat);
-    hostBeat = null;
+function turnSide() {
+    return session.game.state.turn === WOLVES ? 'wolf' : 'sheep';
 }
-let p2pSide = 'wolf';
-let es = null;
-let myNetTurn = false;
-// 手机上点击默认有 300ms 延迟（等双击缩放），关掉它，点一下就响应
-document.head.insertAdjacentHTML('beforeend', '<style>.point,button{touch-action:manipulation}</style>');
+/** 联机时：客机还没收到第一次局面之前不许动 */
+function onlineReady() {
+    if (!room)
+        return true;
+    if (room.host)
+        return true;
+    return peerSeq >= 0;
+}
+function myTurn() {
+    return !session.outcome && onlineReady() && turnSide() === mySide();
+}
+function canTouchBoard() {
+    if (room)
+        return myTurn();
+    if (manual)
+        return !session.outcome;
+    return session.humanTurn && !session.outcome;
+}
+/* ================= 棋盘渲染 ================= */
 const cells = [];
 function buildBoard() {
     for (let i = 0; i < 25; i++) {
@@ -95,12 +169,25 @@ function isWolf(p) {
 function isSheep(p) {
     return (session.game.state.sheep & (1 << p)) !== 0;
 }
+let flash = null;
+let flashTimer = null;
+function flashMove(from, to, mine) {
+    flash = { from, to, mine };
+    if (flashTimer)
+        clearTimeout(flashTimer);
+    flashTimer = setTimeout(() => {
+        flash = null;
+        flashTimer = null;
+        render();
+    }, 800);
+    render();
+}
 const lastSig = new Array(25).fill('');
 function render() {
     const s = session.game.state;
     const wolfSet = new Set(bits(s.wolves));
     const sheepSet = new Set(bits(s.sheep));
-    // 只更新变化的格子：原来每步重建全部 DOM，羊多时会掉帧
+    // 只更新变化的格子：每步重建全部 DOM 会掉帧
     for (let i = 0; i < 25; i++) {
         const isW = wolfSet.has(i);
         const isS = sheepSet.has(i);
@@ -108,7 +195,9 @@ function render() {
         const hasTarget = targets.has(i);
         const isCapture = hasTarget && targets.get(i) >= 0;
         const isHint = !!hint && (hint.from === i || hint.to === i);
-        const sig = `${isW ? 'W' : isS ? 'S' : '-'}${sel ? 1 : 0}${hasTarget ? (isCapture ? 'C' : 'T') : '0'}${isHint ? 1 : 0}`;
+        const last = lastMove === null ? '' : lastMove.from === i ? 'f' : lastMove.to === i ? 't' : '';
+        const flashCls = flash && flash.to === i ? (flash.mine ? 'M' : 'O') : flash && flash.from === i ? 'F' : '';
+        const sig = `${isW ? 'W' : isS ? 'S' : '-'}${sel ? 1 : 0}${hasTarget ? (isCapture ? 'C' : 'T') : '0'}${isHint ? 1 : 0}${flashCls}${last}`;
         if (lastSig[i] === sig)
             continue;
         lastSig[i] = sig;
@@ -118,7 +207,9 @@ function render() {
                 (isW ? ' wolf' : isS ? ' sheep' : '') +
                 (sel ? ' selected' : '') +
                 (hasTarget ? (isCapture ? ' capture-target' : ' target') : '') +
-                (isHint ? ' hint' : '');
+                (isHint ? ' hint' : '') +
+                (last === 'f' ? ' last-from' : last === 't' ? ' last-to' : '') +
+                (flashCls === 'M' ? ' flash-mine' : flashCls === 'O' ? ' flash-opp' : '');
         const want = isW ? '狼' : isS ? '羊' : '';
         const cur = b.firstElementChild;
         if (!want) {
@@ -133,157 +224,167 @@ function render() {
             b.appendChild(sp);
         }
     }
-    const turn = s.turn === WOLVES ? '狼' : '羊';
-    const mine = session.humanTurn;
-    manualBtn.classList.toggle('on', manual);
-    if (p2p && net) {
-        const role = p2pSide === 'wolf' ? '狼' : '羊';
-        statusEl.textContent = session.outcome
-            ? '对局结束'
-            : !p2p.synced && !p2p.isHost
-                ? `联机 · 你执${role} · 同步中…`
-                : myNetTurn
-                    ? `联机 · 你执${role} · 轮到你`
-                    : `联机 · 你执${role} · 等对手`;
+    renderStatus();
+    renderPips();
+    syncHud();
+    renderOverlay();
+}
+function renderStatus() {
+    const ts = turnSide();
+    const me = mySide();
+    let text;
+    if (session.outcome) {
+        text = '对局结束';
     }
-    else if (net) {
-        statusEl.textContent = session.outcome
-            ? '对局结束'
-            : myNetTurn
-                ? `联机 · 房间 ${net.roomId} · 轮到你`
-                : `联机 · 房间 ${net.roomId} · 等对手`;
-    }
-    else if (session.outcome) {
-        statusEl.textContent = '对局结束';
+    else if (room) {
+        if (pendingReq) {
+            text = `已请求${reqLabel(pendingReq.act)}，等对方同意…`;
+        }
+        else if (!onlineReady()) {
+            text = '联机 · 正在同步棋局…';
+        }
+        else if (myTurn()) {
+            text = `联机 · 你执${sideLabel(me)} · 轮到你`;
+        }
+        else {
+            text = `联机 · 你执${sideLabel(me)} · 等对方`;
+        }
     }
     else if (manual) {
-        statusEl.textContent = `测试模式 · ${turn}走`;
+        text = `双人对战 · ${sideLabel(ts)}走`;
     }
     else if (busy) {
-        statusEl.textContent = `${turn}方 AI 思考中…`;
+        text = `${sideLabel(ts)}方 AI 思考中…`;
     }
     else {
-        statusEl.textContent = `你执${session.humanSide === 'wolf' ? '狼' : '羊'} · ${mine ? '轮到你' : 'AI 思考中'}`;
+        text = `你执${sideLabel(me)} · ${session.humanTurn ? '轮到你' : 'AI 思考中'}`;
     }
+    statusEl.textContent = text;
     counterEl.textContent = `羊 ${session.sheepLeft}/15 · ${session.moveCount} 步`;
+}
+function renderPips() {
+    if (!pipsEl)
+        return;
+    if (pipsEl.children.length !== 15) {
+        pipsEl.textContent = '';
+        for (let i = 0; i < 15; i++) {
+            const d = document.createElement('i');
+            d.className = 'pip';
+            pipsEl.appendChild(d);
+        }
+    }
+    const left = session.sheepLeft;
+    for (let i = 0; i < 15; i++) {
+        pipsEl.children[i].classList.toggle('out', i >= left);
+    }
+}
+function renderOverlay() {
     const o = session.outcome;
-    if (o) {
-        overlay.hidden = false;
-        overlayTitle.textContent = o === 'wolf' ? '狼胜' : o === 'sheep' ? '羊胜' : '和棋';
-        overlaySub.textContent =
-            o === 'wolf'
-                ? `吃掉了 ${15 - session.sheepLeft} 只羊`
-                : o === 'sheep'
-                    ? '三只狼全部被围死'
-                    : '三次重复局面';
-    }
-    else {
+    if (!o) {
         overlay.hidden = true;
+        return;
     }
+    overlay.hidden = false;
+    overlayTitle.textContent = o === 'wolf' ? '狼胜' : o === 'sheep' ? '羊胜' : '和棋';
+    overlaySub.textContent =
+        o === 'wolf'
+            ? `吃掉了 ${15 - session.sheepLeft} 只羊`
+            : o === 'sheep'
+                ? '三只狼全部被围死'
+                : '三次重复局面';
+}
+function syncHud() {
+    const me = mySide();
+    for (const b of sideSeg.querySelectorAll('button')) {
+        b.classList.toggle('active', b.dataset.side === me);
+        b.disabled = !!room;
+    }
+    levelSeg.hidden = !!room;
+    manualBtn.classList.toggle('on', manual);
+    if (roomActions)
+        roomActions.hidden = !room;
+    if (matchupEl) {
+        matchupEl.hidden = !room;
+        if (room) {
+            matchupEl.textContent = room.host
+                ? `房间 ${room.code} · 你执${sideLabel(me)} · 朋友执${sideLabel(opposite(me))}`
+                : `房间 ${room.code} · 开房人执${sideLabel(room.hostSide)} · 你执${sideLabel(me)}`;
+        }
+    }
+}
+function refreshAll() {
+    lastSig.fill('');
+    render();
 }
 function clearSelection() {
     selected = null;
     targets.clear();
 }
+/* ================= 走子 ================= */
+function playLegal(from, to) {
+    const mv = session.game.legalMoves().find((m) => m.from === from && m.to === to);
+    if (!mv)
+        return null;
+    session.game.play(mv);
+    return mv;
+}
 function onPoint(p) {
     if (busy || session.outcome)
         return;
-    if (p2p) {
-        if (!myNetTurn)
-            return;
-        if (selected !== null && targets.has(p)) {
-            const from = selected;
-            clearSelection();
-            if (p2p.isHost) {
-                if (session.playHuman(from, p)) {
-                    myNetTurn = false;
-                    p2p.sendCode(session.code());
-                    render();
-                }
-            }
-            else {
-                // 客机：先本地落子（0 延迟），再发请求；房主确认后以权威局面覆盖
-                if (session.playHuman(from, p)) {
-                    myNetTurn = false;
-                    render();
-                }
-                p2p.sendMove(from, p);
-            }
-            return;
-        }
-        const sideNow = session.game.state.turn === WOLVES ? 'wolf' : 'sheep';
-        const own = sideNow === 'wolf' ? isWolf(p) : isSheep(p);
-        if (own) {
-            const ms = session.movesFrom(p);
-            selected = ms.length ? p : null;
-            targets = new Map(ms.map((m) => [m.to, m.captured]));
-        }
-        else {
-            clearSelection();
-        }
-        render();
+    if (!canTouchBoard()) {
+        if (room && onlineReady() && !myTurn())
+            toast('等对方走完');
         return;
     }
-    if (net) {
-        if (!myNetTurn)
-            return;
-        if (selected !== null && targets.has(p)) {
-            const from = selected;
-            clearSelection();
-            render();
-            void sendMove(net.roomId, net.side, net.token, from, p).catch((e) => {
-                alert(e.message);
-                render();
-            });
-            return;
-        }
-        const sideNow = session.game.state.turn === WOLVES ? 'wolf' : 'sheep';
-        const own = sideNow === 'wolf' ? isWolf(p) : isSheep(p);
-        if (own) {
-            const ms = session.movesFrom(p);
-            selected = ms.length ? p : null;
-            targets = new Map(ms.map((m) => [m.to, m.captured]));
-        }
-        else {
-            clearSelection();
-        }
-        render();
-        return;
-    }
-    if (!session.humanTurn)
-        return;
-    // 点目标格：执行移动
     if (selected !== null && targets.has(p)) {
-        const from = selected;
-        clearSelection();
-        hint = null;
-        if (session.playHuman(from, p)) {
-            render();
-            void aiTurn();
-        }
+        commitMove(selected, p);
         return;
     }
-    // 点自己的子：选中
-    const side = session.game.state.turn === WOLVES ? 'wolf' : 'sheep';
-    const own = side === 'wolf' ? isWolf(p) : isSheep(p);
+    const ts = turnSide();
+    const own = ts === 'wolf' ? isWolf(p) : isSheep(p);
     if (own) {
         const ms = session.movesFrom(p);
-        if (!ms.length) {
-            selected = null;
-            targets.clear();
+        selected = ms.length ? p : null;
+        targets = new Map(ms.map((m) => [m.to, m.captured]));
+        if (!ms.length)
+            toast('这个子没有可走的位置', 1400);
+    }
+    else {
+        clearSelection();
+    }
+    render();
+}
+function commitMove(from, to) {
+    clearSelection();
+    hint = null;
+    if (room) {
+        const mv = playLegal(from, to);
+        if (!mv) {
             render();
             return;
         }
-        selected = p;
-        targets = new Map(ms.map((m) => [m.to, m.captured]));
+        lastMove = { from, to };
+        flashMove(from, to, true);
+        if (room.host) {
+            seq++;
+            publishState();
+        }
+        else {
+            relay?.sendMove(from, to);
+        }
         render();
         return;
     }
-    clearSelection();
+    if (!session.playHuman(from, to)) {
+        render();
+        return;
+    }
+    lastMove = { from, to };
     render();
+    void aiTurn();
 }
 async function aiTurn() {
-    if (net)
+    if (room)
         return;
     if (session.manual)
         return;
@@ -294,29 +395,60 @@ async function aiTurn() {
     busy = true;
     render();
     await new Promise((r) => setTimeout(r, 90));
+    const before = session.moveCount;
     session.playAi();
     busy = false;
+    const lastAi = session.game.moves[session.game.moves.length - 1];
+    if (session.moveCount > before && lastAi) {
+        lastMove = { from: lastAi.from, to: lastAi.to };
+        flashMove(lastAi.from, lastAi.to, false);
+    }
     render();
     if (!session.humanTurn && !session.outcome)
         void aiTurn();
 }
+/* ================= 一局的生命周期 ================= */
 function newGame() {
     clearSelection();
     hint = null;
+    lastMove = null;
     busy = false;
-    stopHostBeat();
-    lastSig.fill('');
+    pendingReq = null;
     session = new Session({ humanSide: side, level, manual });
-    render();
-    if (!session.humanTurn)
+    refreshAll();
+    if (!room && !session.humanTurn)
         void aiTurn();
+}
+/** 联机：房主开新的一局（重开 / 换边），然后广播 */
+function startRound() {
+    round++;
+    seq++;
+    session = new Session({ humanSide: mySide(), level, manual: false, wolfCols: [0, 2, 4] });
+    clearSelection();
+    hint = null;
+    lastMove = null;
+    busy = false;
+    pendingReq = null;
+    refreshAll();
+    publishState();
+}
+/** 把当前对局退回到第 keep 步之后的局面 */
+function rebuild(keep) {
+    const cols = session.wolfCols;
+    const src = session.game.moves.slice();
+    const g = new Game(startState(cols));
+    for (let i = 0; i < keep && i < src.length; i++) {
+        const mv = src[i];
+        const legal = g.legalMoves().find((m) => m.from === mv.from && m.to === mv.to);
+        if (legal)
+            g.play(legal);
+    }
+    session = new Session({ humanSide: mySide(), level, manual, wolfCols: cols, game: g });
 }
 function setSide(next) {
     side = next;
-    for (const b of sideSeg.querySelectorAll('button')) {
-        b.classList.toggle('active', b.dataset.side === next);
-    }
     newGame();
+    syncHud();
 }
 function setLevel(next) {
     level = next;
@@ -325,131 +457,99 @@ function setLevel(next) {
         b.classList.toggle('active', b.dataset.level === next);
     }
 }
-sideSeg.addEventListener('click', (e) => {
-    const t = e.target.closest('button[data-side]');
-    if (t?.dataset.side)
-        setSide(t.dataset.side);
-});
-levelSeg.addEventListener('click', (e) => {
-    const t = e.target.closest('button[data-level]');
-    if (t?.dataset.level)
-        setLevel(t.dataset.level);
-});
-restartBtn.addEventListener('click', newGame);
-againBtn.addEventListener('click', newGame);
-undoBtn.addEventListener('click', () => {
+/* ================= 悔棋 / 重开 / 换边 ================= */
+function undoLocal() {
     if (busy)
         return;
-    if (session.undo()) {
-        clearSelection();
-        hint = null;
-        render();
+    if (!session.canUndo) {
+        toast('没有可悔的棋');
+        return;
     }
-});
-manualBtn.addEventListener('click', () => {
-    manual = !manual;
+    session.undo();
+    // 人机对战：一直退到轮到自己，否则玩家会卡住
+    if (!manual) {
+        while (session.canUndo && !session.humanTurn)
+            session.undo();
+    }
+    clearSelection();
+    hint = null;
+    lastMove = session.game.moves[session.game.moves.length - 1] ?? null;
+    render();
+}
+async function doUndo() {
+    if (busy || session.outcome)
+        return;
+    if (room) {
+        if (session.moveCount === 0) {
+            toast('还没有棋子可以悔');
+            return;
+        }
+        const keep = undoKeepCount(session.moveCount, mySide());
+        if (keep < 0) {
+            toast('还没有棋子可以悔');
+            return;
+        }
+        if (!relay?.peerOnline) {
+            toast('对方还没连进来');
+            return;
+        }
+        sendReq('undo', keep);
+        return;
+    }
+    undoLocal();
+}
+async function requestRestart() {
+    if (room) {
+        if (session.moveCount === 0 && !session.outcome) {
+            if (room.host)
+                startRound();
+            else if (relay?.peerOnline)
+                sendReq('restart');
+            else
+                toast('还没连上开房的人');
+            return;
+        }
+        if (!relay?.peerOnline) {
+            if (room.host) {
+                const ok = await ask('重开一局', '棋局正在进行，朋友还没连上。确定重开吗？', '重开', '取消');
+                if (ok)
+                    startRound();
+            }
+            else {
+                toast('还没连上开房的人');
+            }
+            return;
+        }
+        sendReq('restart');
+        return;
+    }
+    if (session.moveCount > 0 && !session.outcome) {
+        const ok = await ask('重开一局', '棋局正在进行，确定要重开吗？', '重开', '取消');
+        if (!ok)
+            return;
+    }
     newGame();
-});
-inviteBtn.addEventListener('click', () => {
-    inviteText.value = shareUrl(session.code());
-    inviteCopy.textContent = '复制链接';
-    invitePanel.hidden = false;
-    inviteText.select();
-});
-inviteClose.addEventListener('click', () => {
-    invitePanel.hidden = true;
-});
-inviteCopy.addEventListener('click', async () => {
-    const text = inviteText.value;
-    try {
-        await navigator.clipboard.writeText(text);
-        inviteCopy.textContent = '已复制';
-    }
-    catch {
-        inviteText.select();
-        document.execCommand?.('copy');
-        inviteCopy.textContent = '已复制（如未成功请手动复制）';
-    }
-});
-hintBtn.addEventListener('click', () => {
-    if (busy || session.outcome || !session.humanTurn)
+}
+async function requestSwap() {
+    if (room) {
+        if (!relay?.peerOnline) {
+            toast(room.host ? '朋友还没连进来' : '还没连上开房的人');
+            return;
+        }
+        sendReq('swap');
         return;
-    const r = chooseMove(session.game.state, {
-        ...LEVELS.officer,
-        history: session.game.historyKeys,
-    });
-    if (!r)
+    }
+    if (session.moveCount > 0 && !session.outcome) {
+        const next = opposite(mySide());
+        const ok = await ask('换边', `确定改成执${sideLabel(next)}并重开一局吗？`, '换边重开', '取消');
+        if (!ok)
+            return;
+        setSide(next);
         return;
-    hint = { from: r.move.from, to: r.move.to };
-    render();
-    setTimeout(() => {
-        hint = null;
-        render();
-    }, 1600);
-});
-// ?room=XXXX：从邀请链接直接进房
-const roomParam = new URLSearchParams(location.search).get('room');
-if (roomParam) {
-    netPanel.hidden = false;
-    netCode.value = roomParam.toUpperCase();
-    if (P2P_MODE)
-        void startP2PJoin(roomParam.toUpperCase());
-}
-// 从邀请链接载入棋局
-const hash = location.hash.match(/#g=([0-9a-z]+)/i);
-if (hash) {
-    const r = replayCode(hash[1]);
-    if (r.ok) {
-        manual = true;
-        session = new Session({
-            humanSide: side,
-            level,
-            manual: true,
-            wolfCols: r.layout,
-            game: r.game,
-        });
-        history.replaceState(null, '', location.pathname);
     }
-    else {
-        setTimeout(() => alert(`邀请码无效：${r.error}`), 50);
-    }
+    setSide(opposite(mySide()));
 }
-function applySnapshot(snap) {
-    const g = new Game(startState([0, 2, 4]));
-    for (const mv of snap.moves) {
-        const legal = g.legalMoves().find((m) => m.from === mv.from && m.to === mv.to);
-        if (legal)
-            g.play(legal);
-    }
-    const side = net?.side ?? 'wolf';
-    session = new Session({ humanSide: side, level, wolfCols: [0, 2, 4], game: g });
-    myNetTurn = snap.turn === side;
-    netStatus.textContent = snap.players.wolf && snap.players.sheep
-        ? (myNetTurn ? `轮到你了（你是${side === 'wolf' ? '狼' : '羊'}）` : '等对手走…')
-        : `房间 ${snap.id} · 把房号发给朋友`;
-    render();
-}
-function connectRoom(roomId) {
-    es?.close();
-    es = subscribe(roomId, applySnapshot, () => {
-        netStatus.textContent = '连接断开，刷新页面重试';
-    });
-}
-function closeNetPanel() {
-    netPanel.hidden = true;
-}
-netOpen.addEventListener('click', () => {
-    netPanel.hidden = false;
-});
-netSide.addEventListener('click', (e) => {
-    const t = e.target.closest('button[data-ns]');
-    if (!t?.dataset.ns)
-        return;
-    for (const b of netSide.querySelectorAll('button')) {
-        b.classList.toggle('active', b === t);
-    }
-});
-/* ---------------- MQTT 中转（公共服务器，免部署） ---------------- */
+/* ================= 联机：MQTT 中转 ================= */
 const BROKERS = [
     'wss://broker.emqx.io:8084/mqtt',
     'wss://broker.hivemq.com:8884/mqtt',
@@ -470,11 +570,18 @@ function ensureMqtt() {
     });
     return mqttReady;
 }
+/**
+ * 借公用的 MQTT 服务器做中转，双方各订阅一个主题：
+ *   房主订阅 szd15/<房号>/move   —— 收客人的走子和请求
+ *   客机订阅 szd15/<房号>/state  —— 收房主的局面和应答
+ */
 class Relay {
     ev;
     isHost = false;
     hostSide = 'wolf';
     synced = false;
+    /** 对方是否真的连上了（发过 hello / 收到过局面） */
+    peerOnline = false;
     client = null;
     code = '';
     brokerIndex = 0;
@@ -484,6 +591,12 @@ class Relay {
     }
     base() {
         return `szd15/${this.code}/`;
+    }
+    get inTopic() {
+        return this.base() + (this.isHost ? 'move' : 'state');
+    }
+    get outTopic() {
+        return this.base() + (this.isHost ? 'state' : 'move');
     }
     host() {
         const alphabet = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
@@ -513,24 +626,24 @@ class Relay {
         this.client = client;
         client.on('connect', () => {
             this.ev.onLog?.('中转已连上');
+            client.subscribe(this.inTopic);
             if (this.isHost) {
-                client.subscribe(this.base() + 'move');
                 this.ev.onStatus?.(`房间 ${this.code} · 等朋友连进来`);
+                return;
             }
-            else {
-                client.subscribe(this.base() + 'state');
-                const ask = () => {
-                    try {
-                        client.publish(this.base() + 'move', JSON.stringify({ t: 'hello' }));
-                    }
-                    catch { /* ignore */ }
-                };
-                ask();
-                if (this.helloTimer)
-                    clearInterval(this.helloTimer);
-                this.helloTimer = setInterval(ask, 3000);
-                this.ev.onStatus?.('已连上中转，正在同步棋局…');
-            }
+            const ask = () => {
+                try {
+                    client.publish(this.base() + 'move', JSON.stringify({ t: 'hello' }));
+                }
+                catch {
+                    /* ignore */
+                }
+            };
+            ask();
+            if (this.helloTimer)
+                clearInterval(this.helloTimer);
+            this.helloTimer = setInterval(ask, 2500);
+            this.ev.onStatus?.('已连上中转，正在同步棋局…');
         });
         client.on('message', (_topic, payload) => {
             let msg = null;
@@ -542,20 +655,7 @@ class Relay {
             }
             if (!msg)
                 return;
-            if (this.isHost) {
-                if (msg.t === 'hello') {
-                    this.ev.onLog?.('收到 hello，回发局面');
-                    this.ev.onPeerConnected?.();
-                }
-                else if (msg.t === 'move') {
-                    this.ev.onMoveRequest?.(msg.from, msg.to);
-                }
-            }
-            else if (msg.t === 'state') {
-                this.synced = true;
-                this.ev.onLog?.(`收到局面 code=${msg.code}`);
-                this.ev.onState?.(msg.code, msg.side);
-            }
+            this.dispatch(msg);
         });
         client.on('error', (e) => {
             this.ev.onLog?.(`中转错误：${e?.message ?? e}`);
@@ -564,26 +664,78 @@ class Relay {
                 try {
                     this.client?.end(true);
                 }
-                catch { /* ignore */ }
-                setTimeout(() => this.connect(), 500);
+                catch {
+                    /* ignore */
+                }
+                setTimeout(() => this.connect(), 400);
             }
             else {
-                this.ev.onError?.('中转服务器都连不上');
+                this.ev.onError?.('中转服务器都连不上，换个网络再试');
             }
         });
     }
-    sendCode(code) {
-        try {
-            this.client?.publish(this.base() + 'state', JSON.stringify({ t: 'state', code, side: this.hostSide }));
-            this.ev.onLog?.(`发送局面 code=${code}`);
+    dispatch(msg) {
+        if (this.isHost) {
+            if (msg.t === 'hello') {
+                // 客人会反复发 hello 直到拿到局面，只在第一次提示"连上了"
+                const first = !this.peerOnline;
+                this.peerOnline = true;
+                if (first) {
+                    this.ev.onLog?.('收到 hello，回发局面');
+                    this.ev.onPeer?.(true);
+                }
+            }
+            else if (msg.t === 'move') {
+                this.ev.onMove?.(msg.from, msg.to);
+            }
+            else if (msg.t === 'req') {
+                this.ev.onLog?.(`收到请求 ${msg.act}`);
+                this.ev.onReq?.(msg.act, msg.id, msg.keep);
+            }
+            else if (msg.t === 'res') {
+                this.ev.onRes?.(msg.id, msg.ok);
+            }
+            return;
         }
-        catch { /* ignore */ }
+        if (msg.t === 'state') {
+            this.synced = true;
+            this.peerOnline = true;
+            if (this.helloTimer) {
+                clearInterval(this.helloTimer);
+                this.helloTimer = null;
+            }
+            this.ev.onState?.(msg);
+        }
+        else if (msg.t === 'req') {
+            this.peerOnline = true;
+            this.ev.onLog?.(`收到请求 ${msg.act}`);
+            this.ev.onReq?.(msg.act, msg.id, msg.keep);
+        }
+        else if (msg.t === 'res') {
+            this.peerOnline = true;
+            this.ev.onRes?.(msg.id, msg.ok);
+        }
+    }
+    pub(msg) {
+        try {
+            this.client?.publish(this.outTopic, JSON.stringify(msg));
+            return true;
+        }
+        catch {
+            return false;
+        }
+    }
+    sendState(m) {
+        this.pub(m);
     }
     sendMove(from, to) {
-        try {
-            this.client?.publish(this.base() + 'move', JSON.stringify({ t: 'move', from, to }));
-        }
-        catch { /* ignore */ }
+        this.pub({ t: 'move', from, to });
+    }
+    sendReq(act, id, keep) {
+        this.pub({ t: 'req', act, id, keep });
+    }
+    sendRes(id, ok) {
+        this.pub({ t: 'res', id, ok });
     }
     get connected() {
         return !!this.client?.connected;
@@ -595,136 +747,392 @@ class Relay {
         try {
             this.client?.end(true);
         }
-        catch { /* ignore */ }
+        catch {
+            /* ignore */
+        }
         this.client = null;
     }
 }
-function p2pEvents() {
+function publishState() {
+    if (!relay || !room?.host)
+        return;
+    relay.sendState({ t: 'state', code: session.code(), side: room.hostSide, seq, round });
+}
+function startBeat() {
+    stopBeat();
+    beatTimer = setInterval(() => {
+        if (room?.host)
+            publishState();
+    }, 2000);
+}
+function stopBeat() {
+    if (beatTimer)
+        clearInterval(beatTimer);
+    beatTimer = null;
+}
+function resetNet() {
+    stopBeat();
+    relay?.close();
+    relay = null;
+    room = null;
+    pendingReq = null;
+    peerSeq = -1;
+    peerRound = -1;
+    if (netCopy)
+        netCopy.hidden = true;
+}
+function closeNetPanel() {
+    netPanel.hidden = true;
+}
+function relayEvents() {
     return {
-        onStatus: (txt) => {
-            netStatus.textContent = txt;
+        onStatus: (t) => {
+            netStatus.textContent = t;
         },
-        onError: (txt) => {
-            logNet(`错误：${txt}`);
-            netStatus.textContent = `连接失败：${txt}。可改用「邀请朋友接着下」`;
+        onError: (t) => {
+            logNet(`错误：${t}`);
+            netStatus.textContent = `连接失败：${t}`;
         },
-        onLog: (txt) => logNet(txt),
-        onPeerConnected: () => {
-            p2p?.sendCode(session.code());
-            closeNetPanel();
-        },
-        onMoveRequest: (from, to) => {
-            // 房主替客机落子：不能用 playHuman（它有"轮到你"的限制）
-            const mv = session.game.legalMoves().find((m) => m.from === from && m.to === to);
-            if (!mv)
+        onLog: logNet,
+        onPeer: (connected) => {
+            if (!connected)
                 return;
-            session.game.play(mv);
-            myNetTurn = true;
-            p2p?.sendCode(session.code());
-            closeNetPanel();
-            render();
-        },
-        onState: (code, hostSide) => {
-            const r = replayCode(code);
-            if (!r.ok) {
-                netStatus.textContent = `同步失败：${r.error}`;
-                return;
+            if (room?.host) {
+                toast(`朋友已连上：你执${sideLabel(room.hostSide)}，对方执${sideLabel(opposite(room.hostSide))}`, 3200);
             }
-            // 忽略比当前更旧的局面（心跳可能乱序到达）
-            if (r.game.moves.length < session.moveCount)
-                return;
-            p2pSide = hostSide === 'wolf' ? 'sheep' : 'wolf';
-            session = new Session({ humanSide: p2pSide, level, wolfCols: r.layout, game: r.game });
-            myNetTurn = session.game.state.turn === (p2pSide === 'wolf' ? 0 : 1);
-            netStatus.textContent =
-                `已同步 ${session.moveCount} 步 · 你执${p2pSide === 'wolf' ? '狼' : '羊'} · ` +
-                    (myNetTurn ? '轮到你' : '等房主走');
             closeNetPanel();
+            startBeat();
+            publishState();
             render();
         },
+        onState: (m) => applyPeerState(m),
+        onMove: (from, to) => onPeerMove(from, to),
+        onReq: (act, id, keep) => {
+            void onPeerReq(act, id, keep);
+        },
+        onRes: (id, ok) => onPeerRes(id, ok),
     };
 }
-async function startP2PHost(side) {
-    if (!(await ensureMqtt())) {
-        netStatus.textContent = '中转组件没加载出来（CDN 被拦），请用「邀请朋友接着下」';
+/** 客机：收到房主的权威局面 */
+function applyPeerState(m) {
+    if (!room || room.host)
+        return;
+    const r = replayCode(m.code);
+    if (!r.ok) {
+        netStatus.textContent = `同步失败：${r.error}`;
         return;
     }
-    p2p?.close();
-    p2p = new Relay(p2pEvents());
-    p2p.hostSide = side;
-    p2pSide = side;
-    const code = p2p.host();
-    startHostBeat();
-    netPanel.hidden = false;
-    net = { roomId: code, side, token: 'p2p' };
+    let fresh = peerRound < 0 || isFresher({ round: m.round, seq: m.seq }, { round: peerRound, seq: peerSeq });
+    // 心跳重发的同一版本：如果步数对不上，说明我这边多走了一步（消息丢了），以房主为准
+    if (!fresh && m.round === peerRound && m.seq === peerSeq && r.game.moves.length !== session.moveCount) {
+        fresh = true;
+    }
+    if (!fresh)
+        return;
+    const first = peerRound < 0;
+    const newRound = !first && m.round !== peerRound;
+    const prevCount = session.moveCount;
+    peerRound = m.round;
+    peerSeq = m.seq;
+    round = m.round;
+    room.hostSide = m.side;
+    side = opposite(m.side);
+    session = new Session({ humanSide: side, level, manual: false, wolfCols: r.layout, game: r.game });
+    if (first || newRound) {
+        clearSelection();
+        hint = null;
+        lastMove = null;
+        pendingReq = null;
+    }
+    refreshAll();
+    const moves = r.game.moves;
+    const last = moves[moves.length - 1];
+    if (!first && !newRound && last && moves.length === prevCount + 1) {
+        lastMove = { from: last.from, to: last.to };
+        flashMove(last.from, last.to, false);
+    }
+    else if (!first && moves.length < prevCount) {
+        toast('刚才那步没送到，请再走一次', 2600);
+    }
+    if (newRound)
+        toast('新的一局开始了', 2000);
+    if (first) {
+        toast(`开房人执${sideLabel(room.hostSide)}，你自动执${sideLabel(side)}`, 3600);
+        netStatus.textContent = `已连上 · 开房人执${sideLabel(room.hostSide)} · 你执${sideLabel(side)}`;
+        closeNetPanel();
+    }
+}
+/** 房主：客人走了一步 */
+function onPeerMove(from, to) {
+    if (!room?.host)
+        return;
+    const mv = playLegal(from, to);
+    if (!mv) {
+        // 两边不一致时用权威局面把对方纠正回来
+        publishState();
+        return;
+    }
+    lastMove = { from, to };
+    seq++;
+    publishState();
+    flashMove(from, to, false);
+    render();
+}
+/* ================= 请求 / 同意 ================= */
+function sendReq(act, keep = -1) {
+    if (!relay?.peerOnline) {
+        toast('对方还没连进来');
+        return;
+    }
+    if (pendingReq) {
+        toast('上一个请求还没回应');
+        return;
+    }
+    const id = Math.random().toString(36).slice(2, 8);
+    pendingReq = { act, id, keep };
+    relay.sendReq(act, id, keep);
+    toast(`已发出「${reqLabel(act)}」请求，等对方同意…`, 4000);
+    render();
+    setTimeout(() => {
+        if (pendingReq?.id === id) {
+            pendingReq = null;
+            toast('对方没有回应', 2200);
+            render();
+        }
+    }, 20000);
+}
+async function onPeerReq(act, id, keep) {
+    let detail = reqLabel(act);
+    if (act === 'undo') {
+        const back = Math.max(1, session.moveCount - keep);
+        detail = `悔棋（退回 ${back} 步）`;
+    }
+    else if (act === 'swap') {
+        detail = '互换阵营（会立刻开新的一局）';
+    }
+    else if (act === 'restart') {
+        detail = '重开一局';
+    }
+    const ok = await ask('对方的请求', `对方想${detail}，你同意吗？`, '同意', '不同意');
+    relay?.sendRes(id, ok);
+    if (!ok)
+        return;
+    if (room?.host) {
+        hostApply(act, keep);
+    }
+    else {
+        toast('已同意，等房主同步…', 2000);
+    }
+}
+function onPeerRes(id, ok) {
+    if (!pendingReq || pendingReq.id !== id)
+        return;
+    const { act, keep } = pendingReq;
+    pendingReq = null;
+    if (!ok) {
+        toast('对方不同意');
+        render();
+        return;
+    }
+    toast('对方同意了', 1600);
+    if (room?.host)
+        hostApply(act, keep);
+    render();
+}
+/** 房主执行被同意的操作 */
+function hostApply(act, keep) {
+    if (!room?.host)
+        return;
+    if (act === 'swap') {
+        room.hostSide = opposite(room.hostSide);
+        side = room.hostSide;
+        startRound();
+        toast(`已互换：你现在执${sideLabel(side)}`, 3000);
+        return;
+    }
+    if (act === 'restart') {
+        startRound();
+        toast('已重开一局', 1800);
+        return;
+    }
+    if (session.moveCount === 0)
+        return;
+    const k = Math.max(0, Math.min(keep, session.moveCount - 1));
+    rebuild(k);
+    seq++;
+    clearSelection();
+    hint = null;
+    lastMove = session.game.moves[session.game.moves.length - 1] ?? null;
+    publishState();
+    render();
+    toast(`已悔棋，当前 ${session.moveCount} 步`, 1800);
+}
+/* ================= 开房 / 加入 / 退出 ================= */
+async function createGame(hostSide) {
+    if (!(await ensureMqtt())) {
+        netStatus.textContent = '联机组件没加载出来（网络可能被拦），换个网络或刷新再试';
+        return;
+    }
+    resetNet();
+    relay = new Relay(relayEvents());
+    relay.isHost = true;
+    relay.hostSide = hostSide;
+    const code = relay.host();
+    room = { code, host: true, hostSide };
+    side = hostSide;
     manual = false;
-    session = new Session({ humanSide: side, level, wolfCols: [0, 2, 4] });
-    myNetTurn = side === 'wolf';
-    netStatus.textContent = `房间 ${code} · 把房号发给朋友`;
-    if (netCopy)
+    seq = 0;
+    round = 0;
+    peerSeq = -1;
+    peerRound = -1;
+    newGame();
+    netCode.value = code;
+    if (netCopy) {
         netCopy.hidden = false;
-    render();
+        netCopy.textContent = '复制邀请链接';
+    }
+    netStatus.textContent = `房间 ${code} · 你执${sideLabel(hostSide)}，朋友会执${sideLabel(opposite(hostSide))}`;
+    startBeat();
+    publishState();
+    refreshAll();
 }
-async function startP2PJoin(code) {
+async function joinGame(code) {
     if (!(await ensureMqtt())) {
-        netStatus.textContent = '中转组件没加载出来（CDN 被拦），请用「邀请朋友接着下」';
+        netStatus.textContent = '联机组件没加载出来（网络可能被拦），换个网络或刷新再试';
         return;
     }
-    p2p?.close();
-    p2p = new Relay(p2pEvents());
-    net = { roomId: code, side: 'wolf', token: 'p2p' };
+    resetNet();
+    relay = new Relay(relayEvents());
+    relay.isHost = false;
+    relay.join(code);
+    room = { code, host: false, hostSide: 'wolf' };
     manual = false;
-    myNetTurn = false;
-    netStatus.textContent = '连接中…';
-    p2p.join(code);
-    netStatus.textContent = '连接中…';
-    render();
+    netCode.value = code;
+    netStatus.textContent = `正在进入房间 ${code}…`;
+    refreshAll();
 }
-netCreate.addEventListener('click', async () => {
-    const active = netSide.querySelector('button.active');
-    const side = (active?.dataset.ns ?? 'wolf');
-    if (P2P_MODE) {
-        void startP2PHost(side);
+function leaveRoom() {
+    const was = mySide();
+    resetNet();
+    side = was;
+    newGame();
+    closeNetPanel();
+    toast('已退出房间');
+}
+/* ================= 按钮绑定 ================= */
+sideSeg.addEventListener('click', (e) => {
+    if (room)
+        return;
+    const t = e.target.closest('button[data-side]');
+    if (t?.dataset.side)
+        setSide(t.dataset.side);
+});
+levelSeg.addEventListener('click', (e) => {
+    const t = e.target.closest('button[data-level]');
+    if (t?.dataset.level)
+        setLevel(t.dataset.level);
+});
+restartBtn.addEventListener('click', () => {
+    void requestRestart();
+});
+againBtn.addEventListener('click', () => {
+    void requestRestart();
+});
+againSwapBtn?.addEventListener('click', () => {
+    void requestSwap();
+});
+undoBtn.addEventListener('click', () => {
+    void doUndo();
+});
+swapBtn?.addEventListener('click', () => {
+    void requestSwap();
+});
+leaveBtn?.addEventListener('click', () => {
+    leaveRoom();
+});
+manualBtn.addEventListener('click', () => {
+    if (room) {
+        toast('联机时不能切双人对战');
         return;
     }
+    manual = !manual;
+    newGame();
+});
+inviteBtn.addEventListener('click', () => {
+    inviteText.value = shareUrl(session.code());
+    inviteCopy.textContent = '复制链接';
+    invitePanel.hidden = false;
+    inviteText.select();
+});
+inviteClose.addEventListener('click', () => {
+    invitePanel.hidden = true;
+});
+inviteCopy.addEventListener('click', async () => {
+    const text = inviteText.value;
     try {
-        const r = await createRoom(side);
-        net = r;
-        manual = false;
-        netStatus.textContent = `房间 ${r.roomId} · 把房号发给朋友`;
-        connectRoom(r.roomId);
+        await navigator.clipboard.writeText(text);
+        inviteCopy.textContent = '已复制';
     }
-    catch (err) {
-        netStatus.textContent = err.message;
+    catch {
+        inviteText.select();
+        document.execCommand?.('copy');
+        inviteCopy.textContent = '已复制（如未成功请手动复制）';
     }
 });
-netJoin.addEventListener('click', async () => {
+hintBtn.addEventListener('click', () => {
+    if (busy || session.outcome || !canTouchBoard())
+        return;
+    const r = chooseMove(session.game.state, {
+        ...LEVELS.officer,
+        history: session.game.historyKeys,
+    });
+    if (!r)
+        return;
+    hint = { from: r.move.from, to: r.move.to };
+    render();
+    setTimeout(() => {
+        hint = null;
+        render();
+    }, 1600);
+});
+netOpen.addEventListener('click', () => {
+    netPanel.hidden = false;
+    if (room) {
+        if (netCopy)
+            netCopy.hidden = false;
+        netStatus.textContent = room.host
+            ? `房间 ${room.code} · 你执${sideLabel(mySide())}，朋友会执${sideLabel(opposite(mySide()))}`
+            : `房间 ${room.code} · 开房人执${sideLabel(room.hostSide)} · 你执${sideLabel(mySide())}`;
+    }
+});
+netSide.addEventListener('click', (e) => {
+    const t = e.target.closest('button[data-ns]');
+    if (!t?.dataset.ns)
+        return;
+    for (const b of netSide.querySelectorAll('button')) {
+        b.classList.toggle('active', b === t);
+    }
+});
+netCreate.addEventListener('click', () => {
+    const active = netSide.querySelector('button.active');
+    const chosen = (active?.dataset.ns ?? 'wolf');
+    void createGame(chosen);
+});
+netJoin.addEventListener('click', () => {
     const code = netCode.value.trim().toUpperCase();
     if (code.length < 4) {
         netStatus.textContent = '房号至少 4 位';
         return;
     }
-    if (P2P_MODE) {
-        void startP2PJoin(code);
-        return;
-    }
-    try {
-        const r = await joinRoom(code);
-        net = r;
-        manual = false;
-        connectRoom(r.roomId);
-    }
-    catch (err) {
-        netStatus.textContent = err.message;
-    }
+    void joinGame(code);
 });
 netClose.addEventListener('click', () => {
-    netPanel.hidden = true;
+    closeNetPanel();
 });
 netCopy?.addEventListener('click', async () => {
-    if (!net)
+    if (!room)
         return;
-    const url = `${location.origin}${location.pathname}?room=${net.roomId}`;
+    const url = `${location.origin}${location.pathname}?room=${room.code}`;
     try {
         await navigator.clipboard.writeText(url);
         netCopy.textContent = '已复制，发给朋友';
@@ -732,10 +1140,41 @@ netCopy?.addEventListener('click', async () => {
     catch {
         window.prompt('复制这条链接发给朋友：', url);
     }
-    setTimeout(() => { netCopy.textContent = '复制邀请链接'; }, 2000);
+    setTimeout(() => {
+        if (netCopy)
+            netCopy.textContent = '复制邀请链接';
+    }, 2000);
 });
+/* ================= 启动 ================= */
+// ?room=XXXX：从邀请链接直接进房
+const roomParam = new URLSearchParams(location.search).get('room');
+// #g=...：从"邀请朋友接着下"的链接恢复棋局
+const hash = location.hash.match(/#g=([0-9a-z]+)/i);
 buildBoard();
-render();
-if (!session.humanTurn)
+if (hash) {
+    const r = replayCode(hash[1]);
+    if (r.ok) {
+        manual = true;
+        session = new Session({
+            humanSide: side,
+            level,
+            manual: true,
+            wolfCols: r.layout,
+            game: r.game,
+        });
+        history.replaceState(null, '', location.pathname);
+    }
+    else {
+        setTimeout(() => alert(`邀请码无效：${r.error}`), 50);
+    }
+}
+refreshAll();
+if (roomParam) {
+    netPanel.hidden = false;
+    netCode.value = roomParam.toUpperCase();
+    void joinGame(roomParam.toUpperCase());
+}
+else if (!hash && !session.humanTurn) {
     void aiTurn();
+}
 //# sourceMappingURL=main.js.map
